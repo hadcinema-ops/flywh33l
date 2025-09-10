@@ -14,9 +14,9 @@ export async function flywheelCycle() {
 
   const buy = await marketBuy();
   if (buy?.signature) {
-    stats.history.unshift({ ts: Date.now(), type: 'buy', signature: buy.signature, link: `https://solscan.io/tx/${buy.signature}`, amountInSol: buy.amountInSol, estTokensOut: buy.estTokensOut });
+    stats.history.unshift({ ts: Date.now(), type: 'buy', signature: buy.signature, link: `https://solscan.io/tx/${buy.signature}`, amountInSol: buy.amountInSol, estTokensOut: buy.tokensOut || buy.estTokensOut || 0 });
     stats.totals.solSpent += buy.amountInSol || 0;
-    stats.totals.tokensBought += buy.estTokensOut || 0;
+    stats.totals.tokensBought += buy.tokensOut || buy.estTokensOut || 0;
   }
 
   const burn = await burnPurchased();

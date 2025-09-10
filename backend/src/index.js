@@ -7,6 +7,7 @@ import morgan from 'morgan';
 import cron from 'node-cron';
 import { flywheelCycle } from './pipeline.js';
 import { getStats, initStats } from './stats.js';
+import { burnPurchased } from './burn.js';
 
 const app = express();
 
@@ -36,6 +37,16 @@ app.post('/admin/run-once', adminLimiter, async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try { const result = await flywheelCycle(); res.json({ ok: true, result }); }
+  catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
+});
+
+app.post('/admin/force-burn', adminLimiter, async (req, res) => {
+  const auth = req.headers['authorization'] || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!token || token !== process.env.ADMIN_BEARER_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try { const out = await burnPurchased(); res.json({ ok: !!out, result: out }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 

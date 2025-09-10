@@ -1,7 +1,9 @@
-// Cap Pump buy by spendable SOL; abort cleanly if below MIN_PUMP_SOL.
+// Compute actual tokensOut by reading ATA before/after; confirm buy; retry reads.
+// Works for Jupiter or PumpPortal Local.
 import axios from 'axios';
-import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
+import { getAssociatedTokenAddress, getAccount, getMint } from '@solana/spl-token';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -12,10 +14,31 @@ function keypairFromEnv() {
 }
 function rpc() { const url = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com'; return new Connection(url, 'confirmed'); }
 async function getSolBalanceLamports(conn, pubkey) { return await conn.getBalance(pubkey, { commitment: 'confirmed' }); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-function toFixed6(n){ return Number(n).toFixed(6); }
+async function getAtaPkAndInfo(conn, mintPk, ownerPk) {
+  const ata = await getAssociatedTokenAddress(mintPk, ownerPk, false);
+  let acc = null;
+  try { acc = await getAccount(conn, ata); } catch {}
+  return { ata, acc };
+}
 
-async function jupiterSwap(amountLamports, outputMint, kp, conn) {
+async function confirmAndGetTokensOut(conn, mintPk, ownerPk, beforeAcc, sig) {
+  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
+  // retry reads: up to 6 times over ~3s
+  let afterAcc = null;
+  for (let i=0;i<6;i++){
+    try { afterAcc = await getAccount(conn, await getAssociatedTokenAddress(mintPk, ownerPk, false)); } catch {}
+    if (afterAcc) break;
+    await sleep(500);
+  }
+  const before = beforeAcc ? Number(beforeAcc.amount) : 0;
+  const after = afterAcc ? Number(afterAcc.amount) : 0;
+  const delta = Math.max(0, after - before);
+  return { tokensOut: delta, afterAcc };
+}
+
+async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc) {
   const slippageBps = Number(process.env.SLIPPAGE_BPS || 300);
   const quoteResp = await axios.get('https://quote-api.jup.ag/v6/quote', { params: { inputMint: SOL_MINT, outputMint, amount: amountLamports, slippageBps, onlyDirectRoutes: false } });
   const quote = quoteResp.data;
@@ -25,32 +48,26 @@ async function jupiterSwap(amountLamports, outputMint, kp, conn) {
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
-  return { signature: sig, amountInSol: amountLamports / 1e9, estTokensOut: Number(quote?.outAmount || 0) };
+  const { tokensOut } = await confirmAndGetTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig);
+  return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut };
 }
 
-async function pumpLocalBuy(spendableLamports, outputMint, kp, conn) {
+async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, beforeAcc) {
   const minSol = Number(process.env.MIN_PUMP_SOL || '0.01');
-  const targetSol = Number(process.env.TARGET_PUMP_SOL || '0'); // optional cap
+  const targetSol = Number(process.env.TARGET_PUMP_SOL || '0');
   const spendableSol = Number(spendableLamports) / 1e9;
-  // Choose amount Sol: <= spendable, and <= target (if set)
   let amountSol = spendableSol;
   if (targetSol > 0) amountSol = Math.min(amountSol, targetSol);
-  amountSol = Math.max(0, amountSol);
-
-  if (amountSol + 0.0005 < minSol) { // keep a tiny extra buffer for fees
-    console.log(`[swap] spendable ${toFixed6(spendableSol)} SOL is below MIN_PUMP_SOL ${toFixed6(minSol)} SOL; skipping`);
-    return null;
-  }
-  // leave tiny buffer
+  if (amountSol + 0.0005 < minSol) { console.log('[swap] spendable below MIN_PUMP_SOL; skipping'); return null; }
   amountSol = Math.max(minSol, amountSol - 0.0005);
   amountSol = Math.max(0, Math.min(amountSol, spendableSol));
-  amountSol = Number(toFixed6(amountSol));
+  amountSol = Number(amountSol.toFixed(6));
 
   const body = {
     publicKey: kp.publicKey.toBase58(),
     action: 'buy',
     mint: outputMint,
-    amount: toFixed6(amountSol),
+    amount: amountSol.toFixed(6),
     denominatedInSol: true,
     slippage: Number(process.env.PUMP_SLIPPAGE_PCT || '3'),
     priorityFee: Number(process.env.PRIORITY_FEE_SOL || '0')
@@ -61,7 +78,8 @@ async function pumpLocalBuy(spendableLamports, outputMint, kp, conn) {
     const tx = VersionedTransaction.deserialize(new Uint8Array(data));
     tx.sign([kp]);
     const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
-    return { signature: sig, amountInSol: amountSol, estTokensOut: 0 };
+    const { tokensOut } = await confirmAndGetTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig);
+    return { signature: sig, amountInSol: amountSol, tokensOut };
   } catch (e) {
     const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
     console.error('[swap:pump-local] buy error', msg);
@@ -74,6 +92,10 @@ export async function marketBuy() {
   const kp = keypairFromEnv();
   const outputMint = process.env.MINT_ADDRESS;
   if (!outputMint) throw new Error('MINT_ADDRESS not set');
+  const mintPk = new PublicKey(outputMint);
+
+  // Read ATA before
+  const { acc: beforeAcc } = await getAtaPkAndInfo(conn, mintPk, kp.publicKey);
 
   const reserveLamports = BigInt(Math.floor(Number(process.env.SOL_RESERVE || '0.01') * 1e9));
   const balance = BigInt(await getSolBalanceLamports(conn, kp.publicKey));
@@ -84,16 +106,16 @@ export async function marketBuy() {
   const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase();
   try {
     if (provider === 'pump') {
-      const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn);
+      const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
       if (pumpRes) return pumpRes;
       console.log('[swap] pump local buy failed'); return null;
     }
     const amountLamports = Number(spendable);
-    const jupRes = await jupiterSwap(amountLamports, outputMint, kp, conn);
+    const jupRes = await jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc);
     if (jupRes) return jupRes;
     if (provider === 'jupiter') { console.log('[swap] no route (jupiter only)'); return null; }
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
-    const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn);
+    const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
     if (pumpRes) return pumpRes;
     console.log('[swap] no route and pump fallback failed');
     return null;
