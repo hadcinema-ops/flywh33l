@@ -1,4 +1,4 @@
-// Accurate tokensOut + no overlap with reserve; confirms tx; returns real delta.
+// Defensive Pump/Jupiter buy: always return signature once sent; never throw on confirm/reads.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
@@ -20,16 +20,18 @@ async function getAtaAcc(conn, mintPk, ownerPk) {
   try { return await getAccount(conn, ata); } catch { return null; }
 }
 
-async function afterDelta(conn, mintPk, ownerPk, beforeAcc) {
+async function measureTokensOut(conn, mintPk, ownerPk, beforeAcc, sig) {
+  // Try confirm but don't fail the whole step if it throws
+  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
   let afterAcc=null;
-  for (let i=0;i<8;i++){ // ~4s
+  for (let i=0;i<8;i++){
     try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {}
     if (afterAcc) break;
     await sleep(500);
   }
   const before = beforeAcc ? Number(beforeAcc.amount) : 0;
   const after = afterAcc ? Number(afterAcc.amount) : 0;
-  return { tokensOut: Math.max(0, after - before) };
+  return Math.max(0, after - before);
 }
 
 async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc) {
@@ -42,8 +44,9 @@ async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAc
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
-  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
-  const { tokensOut } = await afterDelta(conn, mintPk, kp.publicKey, beforeAcc);
+  console.log('[buy:jup] sent', sig);
+  let tokensOut = 0;
+  try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
   return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut };
 }
 
@@ -72,8 +75,9 @@ async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, bef
   const tx = VersionedTransaction.deserialize(new Uint8Array(data));
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
-  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
-  const { tokensOut } = await afterDelta(conn, mintPk, kp.publicKey, beforeAcc);
+  console.log('[buy:pump] sent', sig);
+  let tokensOut = 0;
+  try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
   return { signature: sig, amountInSol: amountSol, tokensOut };
 }
 
@@ -86,7 +90,7 @@ export async function marketBuy() {
 
   const beforeAcc = await getAtaAcc(conn, mintPk, kp.publicKey);
 
-  const reserveLamports = BigInt(Math.floor(Number(process.env.SOL_RESERVE || '0.01') * 1e9));
+  const reserveLamports = BigInt(Math.floor(Number(process.env.SOL_RESERVE || '0.02') * 1e9));
   const balance = BigInt(await getSolBalanceLamports(conn, kp.publicKey));
   const spendable = balance > reserveLamports ? (balance - reserveLamports) : 0n;
   const minLamports = BigInt(Math.floor(Number(process.env.MIN_SWAP_SOL || '0.001') * 1e9));
@@ -95,14 +99,16 @@ export async function marketBuy() {
   const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase();
   try {
     if (provider === 'pump') {
-      return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
+      const res = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
+      return res;
     }
     const amountLamports = Number(spendable);
     const jupRes = await jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc);
     if (jupRes) return jupRes;
     if (provider === 'jupiter') { console.log('[swap] no route (jupiter only)'); return null; }
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
-    return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
+    const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
+    return pumpRes;
   } catch (e) {
     const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
     console.error('[swap] error', msg);

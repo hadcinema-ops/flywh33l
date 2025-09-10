@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import cron from 'node-cron';
-import { flywheelCycle, forceSync } from './pipeline.js';
+import { flywheelCycle, forceSync, getLastRun } from './pipeline.js';
 import { getStats, initStats } from './stats.js';
 
 const app = express();
@@ -34,6 +34,11 @@ function authOk(req) {
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   return token && token === process.env.ADMIN_BEARER_TOKEN;
 }
+
+app.get('/admin/last-run', adminLimiter, (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  res.json(getLastRun());
+});
 
 app.post('/admin/run-once', adminLimiter, async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'Unauthorized' });
