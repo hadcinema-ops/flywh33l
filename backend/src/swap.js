@@ -1,8 +1,9 @@
-// Defensive buy path for Jupiter/Pump; returns immediately after send; tokensOut measured best-effort.
+// Defensive buy path with UI amount calculation via decimals in stats.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
+import { getStats, ensureDecimals } from './stats.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -19,10 +20,10 @@ async function getAtaAcc(conn, mintPk, ownerPk) {
   const ata = await getAssociatedTokenAddress(mintPk, ownerPk, false);
   try { return await getAccount(conn, ata); } catch { return null; }
 }
-async function measureTokensOut(conn, mintPk, ownerPk, beforeAcc, sig) {
+async function measureOutRaw(conn, mintPk, ownerPk, beforeAcc, sig) {
   try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
   let afterAcc=null;
-  for (let i=0;i<8;i++){ try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {} if (afterAcc) break; await sleep(500); }
+  for (let i=0;i<10;i++){ try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {} if (afterAcc) break; await sleep(500); }
   const before = beforeAcc ? Number(beforeAcc.amount) : 0;
   const after = afterAcc ? Number(afterAcc.amount) : 0;
   return Math.max(0, after - before);
@@ -39,8 +40,8 @@ async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAc
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
   console.log('[buy:jup] sent', sig);
-  let tokensOut = 0; try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
-  return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut };
+  const outRaw = await measureOutRaw(conn, mintPk, kp.publicKey, beforeAcc, sig);
+  return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut: outRaw };
 }
 
 async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, beforeAcc) {
@@ -69,16 +70,17 @@ async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, bef
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
   console.log('[buy:pump] sent', sig);
-  let tokensOut = 0; try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
-  return { signature: sig, amountInSol: amountSol, tokensOut };
+  const outRaw = await measureOutRaw(conn, mintPk, kp.publicKey, beforeAcc, sig);
+  return { signature: sig, amountInSol: amountSol, tokensOut: outRaw };
 }
 
 export async function marketBuy() {
   const conn = rpc();
   const kp = keypairFromEnv();
-  const outputMint = process.env.MINT_ADDRESS;
+  const outputMint = (await getStats()).config.mint;
   if (!outputMint) throw new Error('MINT_ADDRESS not set');
   const mintPk = new PublicKey(outputMint);
+  await ensureDecimals();
 
   const beforeAcc = await getAtaAcc(conn, mintPk, kp.publicKey);
 

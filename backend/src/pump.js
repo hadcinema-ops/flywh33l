@@ -20,10 +20,7 @@ export async function claimCreatorFees() {
 
     const { data, status } = await axios.post(
       'https://pumpportal.fun/api/trade-local',
-      {
-        publicKey: kp.publicKey.toBase58(),
-        action: 'collectCreatorFee'
-      },
+      { publicKey: kp.publicKey.toBase58(), action: 'collectCreatorFee' },
       { responseType: 'arraybuffer' }
     );
     if (status !== 200) throw new Error('trade-local failed');

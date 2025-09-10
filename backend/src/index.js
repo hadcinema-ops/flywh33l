@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import cron from 'node-cron';
 import { flywheelCycle, forceSync, getLastRun } from './pipeline.js';
-import { getStats, initStats } from './stats.js';
+import { getStats, initStats, getConfigPublic } from './stats.js';
 
 const app = express();
 
@@ -27,6 +27,7 @@ app.use(morgan('tiny'));
 await initStats();
 
 app.get('/public/stats', async (req, res) => res.json(await getStats()));
+app.get('/public/config', async (req, res) => res.json(await getConfigPublic()));
 
 const adminLimiter = rateLimit({ windowMs: 60_000, max: 10 });
 function authOk(req) {
