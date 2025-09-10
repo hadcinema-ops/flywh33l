@@ -15,14 +15,14 @@ export async function flywheelCycle() {
   const buy = await marketBuy();
   if (buy?.signature) {
     stats.history.unshift({ ts: Date.now(), type: 'buy', signature: buy.signature, link: `https://solscan.io/tx/${buy.signature}`, amountInSol: buy.amountInSol, estTokensOut: buy.estTokensOut });
-    stats.totals.solSpent += buy.amountInSol;
-    stats.totals.tokensBought += buy.estTokensOut;
+    stats.totals.solSpent += buy.amountInSol || 0;
+    stats.totals.tokensBought += buy.estTokensOut || 0;
   }
 
   const burn = await burnPurchased();
   if (burn?.signature) {
     stats.history.unshift({ ts: Date.now(), type: 'burn', signature: burn.signature, link: `https://solscan.io/tx/${burn.signature}`, amountTokens: burn.amountTokens });
-    stats.totals.tokensBurned += burn.amountTokens;
+    stats.totals.tokensBurned += burn.amountTokens || 0;
   }
 
   stats.history = stats.history.slice(0, 200);

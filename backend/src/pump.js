@@ -22,9 +22,7 @@ export async function claimCreatorFees() {
       'https://pumpportal.fun/api/trade-local',
       {
         publicKey: kp.publicKey.toBase58(),
-        action: 'collectCreatorFee',
-        // priorityFee: 0.000001, // optional
-        // pool: 'pump'           // optional
+        action: 'collectCreatorFee'
       },
       { responseType: 'arraybuffer' }
     );

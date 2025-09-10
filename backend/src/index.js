@@ -1,13 +1,26 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import cron from 'node-cron';
 import { flywheelCycle } from './pipeline.js';
 import { getStats, initStats } from './stats.js';
 
 const app = express();
-app.use(cors());
+
+app.use(helmet({ hidePoweredBy: true }));
+
+const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    if (!ALLOWED_ORIGINS.length) return cb(null, true);
+    cb(null, ALLOWED_ORIGINS.includes(origin));
+  }
+}));
+
 app.use(express.json());
 app.use(morgan('tiny'));
 
@@ -15,7 +28,8 @@ await initStats();
 
 app.get('/public/stats', async (req, res) => res.json(await getStats()));
 
-app.post('/admin/run-once', async (req, res) => {
+const adminLimiter = rateLimit({ windowMs: 60_000, max: 10 });
+app.post('/admin/run-once', adminLimiter, async (req, res) => {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!token || token !== process.env.ADMIN_BEARER_TOKEN) {
