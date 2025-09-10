@@ -26,8 +26,8 @@ app.use(morgan('tiny'));
 
 await initStats();
 
-app.get('/public/stats', async (req, res) => res.json(await getStats()));
-app.get('/public/config', async (req, res) => res.json(await getConfigPublic()));
+app.get('/public/stats', async (_req, res) => res.json(await getStats()));
+app.get('/public/config', async (_req, res) => res.json(await getConfigPublic()));
 
 const adminLimiter = rateLimit({ windowMs: 60_000, max: 10 });
 function authOk(req) {
@@ -53,7 +53,7 @@ app.post('/admin/force-sync', adminLimiter, async (req, res) => {
   catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 const port = process.env.PORT || 8787;
 app.listen(port, () => console.log(`[flywheel] listening :${port}`));

@@ -1,6 +1,6 @@
-// src/burn.js (true-burn only, v7.1)
+// burn.js v7.2 — true burn only (auto-detect Token-2022 vs SPL) + robust send
 import {
-  Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram,
+  Connection, Keypair, PublicKey, Transaction, ComputeBudgetProgram, sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
   getAssociatedTokenAddress,
@@ -37,7 +37,6 @@ async function probeBalanceAndMint(conn, mintPk, ownerPk) {
   }
   const t22 = await probe(TOKEN_2022_PROGRAM_ID);
   const spl = await probe(TOKEN_PROGRAM_ID);
-  // Prefer the program that actually holds a positive balance; else null
   return (t22.amount > 0) ? t22 : (spl.amount > 0 ? spl : null);
 }
 
@@ -46,7 +45,6 @@ export async function burnPurchased() {
   const kp = keypairFromEnv();
   const mintPk = new PublicKey(process.env.MINT_ADDRESS);
 
-  // Allow time for post-buy settlement and ATA creation
   for (let i = 0; i < 10; i++) await wait(500);
 
   const target = await probeBalanceAndMint(conn, mintPk, kp.publicKey);
@@ -57,18 +55,10 @@ export async function burnPurchased() {
 
   const { programId, ata, amount, decimals } = target;
 
-  // Build burnChecked
   const burnIx = createBurnCheckedInstruction(
-    ata,
-    mintPk,
-    kp.publicKey,
-    BigInt(amount),          // amount in base units (bigint)
-    decimals,                // mint decimals from on-chain
-    [],
-    programId
+    ata, mintPk, kp.publicKey, BigInt(amount), decimals, [], programId
   );
 
-  // Small priority fee to avoid congestion edge cases
   const pri = Number(process.env.PRIORITY_FEE_MICROLAMPORTS || '2000');
   const cuIx = pri ? ComputeBudgetProgram.setComputeUnitPrice({ microLamports: Math.max(0, pri) }) : null;
 
@@ -77,7 +67,6 @@ export async function burnPurchased() {
   tx.add(burnIx);
   tx.feePayer = kp.publicKey;
 
-  // Simulate first for clear logs if something is off
   try {
     const sim = await conn.simulateTransaction(tx, [kp]);
     if (sim?.value?.err) {
@@ -85,19 +74,19 @@ export async function burnPurchased() {
       if (sim?.value?.logs) console.error('[burn] logs:', sim.value.logs);
       throw new Error('Simulation failed');
     }
-  } catch (e) {
-    // proceed to send anyway, but we logged details
-  }
+  } catch (e) {}
 
-  try {
-    const sig = await conn.sendTransaction(tx, { signers: [kp], maxRetries: 3 });
-    return { signature: sig, amountTokensRaw: amount, amountTokensUi: amount / (10 ** decimals) };
-  } catch (sendErr) {
-    // One more simulation to fetch logs for debugging
-    try {
-      const sim = await conn.simulateTransaction(tx, [kp]);
-      if (sim?.value?.logs) console.error('[burn] logs (post-send failure):', sim.value.logs);
-    } catch {}
-    throw sendErr;
-  }
+  // robust send: set recent blockhash & confirm
+  const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash('finalized');
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  tx.sign(kp);
+
+  const sig = await sendAndConfirmTransaction(conn, tx, [kp], {
+    commitment: 'confirmed',
+    skipPreflight: false,
+    maxRetries: 3,
+  });
+
+  return { signature: sig, amountTokensRaw: amount, amountTokensUi: amount / (10 ** decimals) };
 }

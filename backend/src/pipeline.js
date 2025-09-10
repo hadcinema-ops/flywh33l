@@ -28,7 +28,6 @@ export async function flywheelCycle() {
     const buy = await marketBuy();
     step('buy', buy);
     if (buy?.signature) {
-      // Persist BUY immediately (raw + ui)
       const outRaw = Math.max(0, Math.floor(Number(buy.tokensOut || 0)));
       const outUi = toUi(outRaw, decimals);
       stats.history.unshift({ ts: Date.now(), type: 'buy', signature: buy.signature, link: `https://solscan.io/tx/${buy.signature}`, amountInSol: buy.amountInSol, estTokensOut: outUi, tokensOutRaw: outRaw });
@@ -40,7 +39,7 @@ export async function flywheelCycle() {
 
     let burn = null;
     try {
-      burn = await burnPurchased(); // returns { signature, amountTokensRaw, amountTokensUi }
+      burn = await burnPurchased();
       step('burn', burn);
       if (burn?.signature) {
         stats.history.unshift({ ts: Date.now(), type: 'burn', signature: burn.signature, link: `https://solscan.io/tx/${burn.signature}`, amountTokens: burn.amountTokensUi, amountTokensRaw: burn.amountTokensRaw });

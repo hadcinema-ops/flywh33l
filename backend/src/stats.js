@@ -18,7 +18,6 @@ const defaultStats = {
 
 export async function initStats() {
   try { await fs.access(DB_PATH); } catch { await fs.writeFile(DB_PATH, JSON.stringify(defaultStats, null, 2)); }
-  // attempt decimals discovery at boot (best-effort)
   try { await ensureDecimals(); } catch {}
 }
 export async function getStats() {

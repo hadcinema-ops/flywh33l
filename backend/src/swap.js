@@ -1,4 +1,4 @@
-// src/swap.js (measurement v7)
+// swap.js v7.2 — robust buy measurement (meta + dual-ATA)
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
@@ -34,8 +34,7 @@ async function getAllTokenBalances(conn, mintPk, ownerPk) {
 }
 
 async function measureOutRawViaMeta(conn, sig, mint, owner) {
-  // Try to read the transaction meta to compute delta directly
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     const tx = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
     if (tx?.meta) {
       const pre = (tx.meta.preTokenBalances || []).filter(b => b.mint === mint && b.owner === owner.toBase58());
@@ -54,19 +53,18 @@ export async function marketBuy() {
   const conn = rpc();
   const kp = keypairFromEnv();
   const outputMint = (await getStats()).config.mint;
+  if (!outputMint) throw new Error('MINT_ADDRESS not set');
   const mintPk = new PublicKey(outputMint);
 
-  // Pre-balance snapshot
   const before = await getAllTokenBalances(conn, mintPk, kp.publicKey);
 
-  // Determine spendable SOL
   const reserveLamports = BigInt(Math.floor(Number(process.env.SOL_RESERVE || '0.02') * 1e9));
   const balance = BigInt(await conn.getBalance(kp.publicKey, { commitment: 'confirmed' }));
   const spendable = balance > reserveLamports ? (balance - reserveLamports) : 0n;
   const minLamports = BigInt(Math.floor(Number(process.env.MIN_SWAP_SOL || '0.001') * 1e9));
   if (spendable < minLamports) { console.log('[swap] not enough SOL'); return null; }
 
-  // Try Jupiter first
+  // Try Jupiter
   try {
     const slippageBps = Number(process.env.SLIPPAGE_BPS || 300);
     const quoteResp = await axios.get('https://quote-api.jup.ag/v6/quote', {
@@ -84,10 +82,8 @@ export async function marketBuy() {
       tx.sign([kp]);
       const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
       console.log('[buy:jup] sent', sig);
-      // Measure via meta; if zero, fall back to ATA polling
       let outRaw = await measureOutRawViaMeta(conn, sig, outputMint, kp.publicKey);
       if (outRaw === 0) {
-        // Poll both programs a few times
         for (let i=0;i<10 && outRaw===0;i++) {
           const after = await getAllTokenBalances(conn, mintPk, kp.publicKey);
           outRaw = Math.max(0, after.total - before.total);
@@ -126,7 +122,6 @@ export async function marketBuy() {
     const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
     console.log('[buy:pump] sent', sig);
 
-    // Prefer meta delta; fallback to ATA polling
     let outRaw = await measureOutRawViaMeta(conn, sig, outputMint, kp.publicKey);
     if (outRaw === 0) {
       for (let i=0;i<10 && outRaw===0;i++) {
