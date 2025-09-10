@@ -1,9 +1,8 @@
-// Compute actual tokensOut by reading ATA before/after; confirm buy; retry reads.
-// Works for Jupiter or PumpPortal Local.
+// Accurate tokensOut + no overlap with reserve; confirms tx; returns real delta.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { getAssociatedTokenAddress, getAccount, getMint } from '@solana/spl-token';
+import { getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -16,26 +15,21 @@ function rpc() { const url = process.env.RPC_URL || 'https://api.mainnet-beta.so
 async function getSolBalanceLamports(conn, pubkey) { return await conn.getBalance(pubkey, { commitment: 'confirmed' }); }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-async function getAtaPkAndInfo(conn, mintPk, ownerPk) {
+async function getAtaAcc(conn, mintPk, ownerPk) {
   const ata = await getAssociatedTokenAddress(mintPk, ownerPk, false);
-  let acc = null;
-  try { acc = await getAccount(conn, ata); } catch {}
-  return { ata, acc };
+  try { return await getAccount(conn, ata); } catch { return null; }
 }
 
-async function confirmAndGetTokensOut(conn, mintPk, ownerPk, beforeAcc, sig) {
-  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
-  // retry reads: up to 6 times over ~3s
-  let afterAcc = null;
-  for (let i=0;i<6;i++){
-    try { afterAcc = await getAccount(conn, await getAssociatedTokenAddress(mintPk, ownerPk, false)); } catch {}
+async function afterDelta(conn, mintPk, ownerPk, beforeAcc) {
+  let afterAcc=null;
+  for (let i=0;i<8;i++){ // ~4s
+    try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {}
     if (afterAcc) break;
     await sleep(500);
   }
   const before = beforeAcc ? Number(beforeAcc.amount) : 0;
   const after = afterAcc ? Number(afterAcc.amount) : 0;
-  const delta = Math.max(0, after - before);
-  return { tokensOut: delta, afterAcc };
+  return { tokensOut: Math.max(0, after - before) };
 }
 
 async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc) {
@@ -48,7 +42,8 @@ async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAc
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
-  const { tokensOut } = await confirmAndGetTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig);
+  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
+  const { tokensOut } = await afterDelta(conn, mintPk, kp.publicKey, beforeAcc);
   return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut };
 }
 
@@ -72,19 +67,14 @@ async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, bef
     slippage: Number(process.env.PUMP_SLIPPAGE_PCT || '3'),
     priorityFee: Number(process.env.PRIORITY_FEE_SOL || '0')
   };
-  try {
-    const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', body, { responseType: 'arraybuffer' });
-    if (status !== 200) return null;
-    const tx = VersionedTransaction.deserialize(new Uint8Array(data));
-    tx.sign([kp]);
-    const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
-    const { tokensOut } = await confirmAndGetTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig);
-    return { signature: sig, amountInSol: amountSol, tokensOut };
-  } catch (e) {
-    const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
-    console.error('[swap:pump-local] buy error', msg);
-    return null;
-  }
+  const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', body, { responseType: 'arraybuffer' });
+  if (status !== 200) return null;
+  const tx = VersionedTransaction.deserialize(new Uint8Array(data));
+  tx.sign([kp]);
+  const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
+  try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
+  const { tokensOut } = await afterDelta(conn, mintPk, kp.publicKey, beforeAcc);
+  return { signature: sig, amountInSol: amountSol, tokensOut };
 }
 
 export async function marketBuy() {
@@ -94,8 +84,7 @@ export async function marketBuy() {
   if (!outputMint) throw new Error('MINT_ADDRESS not set');
   const mintPk = new PublicKey(outputMint);
 
-  // Read ATA before
-  const { acc: beforeAcc } = await getAtaPkAndInfo(conn, mintPk, kp.publicKey);
+  const beforeAcc = await getAtaAcc(conn, mintPk, kp.publicKey);
 
   const reserveLamports = BigInt(Math.floor(Number(process.env.SOL_RESERVE || '0.01') * 1e9));
   const balance = BigInt(await getSolBalanceLamports(conn, kp.publicKey));
@@ -106,19 +95,14 @@ export async function marketBuy() {
   const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase();
   try {
     if (provider === 'pump') {
-      const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
-      if (pumpRes) return pumpRes;
-      console.log('[swap] pump local buy failed'); return null;
+      return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
     }
     const amountLamports = Number(spendable);
     const jupRes = await jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc);
     if (jupRes) return jupRes;
     if (provider === 'jupiter') { console.log('[swap] no route (jupiter only)'); return null; }
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
-    const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
-    if (pumpRes) return pumpRes;
-    console.log('[swap] no route and pump fallback failed');
-    return null;
+    return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
   } catch (e) {
     const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
     console.error('[swap] error', msg);

@@ -5,9 +5,8 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 import cron from 'node-cron';
-import { flywheelCycle } from './pipeline.js';
+import { flywheelCycle, forceSync } from './pipeline.js';
 import { getStats, initStats } from './stats.js';
-import { burnPurchased } from './burn.js';
 
 const app = express();
 
@@ -30,23 +29,21 @@ await initStats();
 app.get('/public/stats', async (req, res) => res.json(await getStats()));
 
 const adminLimiter = rateLimit({ windowMs: 60_000, max: 10 });
-app.post('/admin/run-once', adminLimiter, async (req, res) => {
+function authOk(req) {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (!token || token !== process.env.ADMIN_BEARER_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  return token && token === process.env.ADMIN_BEARER_TOKEN;
+}
+
+app.post('/admin/run-once', adminLimiter, async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'Unauthorized' });
   try { const result = await flywheelCycle(); res.json({ ok: true, result }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
-app.post('/admin/force-burn', adminLimiter, async (req, res) => {
-  const auth = req.headers['authorization'] || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (!token || token !== process.env.ADMIN_BEARER_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  try { const out = await burnPurchased(); res.json({ ok: !!out, result: out }); }
+app.post('/admin/force-sync', adminLimiter, async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'Unauthorized' });
+  try { const out = await forceSync(); res.json({ ok: true, result: out }); }
   catch (e) { res.status(500).json({ ok: false, error: String(e) }); }
 });
 
