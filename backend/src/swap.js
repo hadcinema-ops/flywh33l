@@ -1,5 +1,4 @@
-// Fix: PumpPortal Local 'buy' expects amount as SOL decimal string (not lamports).
-// Also set pool='pump' and optional priorityFee.
+// PumpPortal Local buy with correct fields: slippage (percent), denominatedInSol, amount as SOL string.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
@@ -16,24 +15,17 @@ async function getSolBalanceLamports(conn, pubkey) { return await conn.getBalanc
 
 function lamportsToSolStr(lamports) {
   const sol = Number(lamports) / 1e9;
-  const min = Number(process.env.MIN_PUMP_SOL || '0.001');
+  const min = Number(process.env.MIN_PUMP_SOL || '0.01');
   const val = Math.max(sol, min);
-  return val.toFixed(6); // 6dp string
+  return val.toFixed(6);
 }
 
 async function jupiterSwap(amountLamports, outputMint, kp, conn) {
   const slippageBps = Number(process.env.SLIPPAGE_BPS || 300);
-  const quoteResp = await axios.get('https://quote-api.jup.ag/v6/quote', {
-    params: { inputMint: SOL_MINT, outputMint, amount: amountLamports, slippageBps, onlyDirectRoutes: false }
-  });
+  const quoteResp = await axios.get('https://quote-api.jup.ag/v6/quote', { params: { inputMint: SOL_MINT, outputMint, amount: amountLamports, slippageBps, onlyDirectRoutes: false } });
   const quote = quoteResp.data;
   if (!quote || !quote.routes || quote.routes.length === 0) return null;
-  const { data: swapTx } = await axios.post('https://quote-api.jup.ag/v6/swap', {
-    quoteResponse: quote,
-    userPublicKey: kp.publicKey.toBase58(),
-    wrapAndUnwrapSol: true,
-    prioritizationFeeLamports: Number(process.env.PRIORITIZATION_FEE_LAMPORTS || 0)
-  }, { headers: { 'Content-Type': 'application/json' } });
+  const { data: swapTx } = await axios.post('https://quote-api.jup.ag/v6/swap', { quoteResponse: quote, userPublicKey: kp.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: Number(process.env.PRIORITIZATION_FEE_LAMPORTS || 0) }, { headers: { 'Content-Type': 'application/json' } });
   const { swapTransaction } = swapTx;
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
   tx.sign([kp]);
@@ -43,16 +35,17 @@ async function jupiterSwap(amountLamports, outputMint, kp, conn) {
 
 async function pumpLocalBuy(amountLamports, outputMint, kp, conn) {
   const amountSol = lamportsToSolStr(amountLamports);
+  const body = {
+    publicKey: kp.publicKey.toBase58(),
+    action: 'buy',
+    mint: outputMint,
+    amount: amountSol,                         // SOL decimal string
+    denominatedInSol: true,
+    slippage: Number(process.env.PUMP_SLIPPAGE_PCT || '3'), // percent
+    priorityFee: Number(process.env.PRIORITY_FEE_SOL || '0')
+  };
   try {
-    const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', {
-      publicKey: kp.publicKey.toBase58(),
-      action: 'buy',
-      mint: outputMint,
-      denominatedInSol: true,
-      amount: amountSol,          // decimal SOL string
-      pool: 'pump',
-      priorityFee: Number(process.env.PRIORITY_FEE_SOL || '0')
-    }, { responseType: 'arraybuffer' });
+    const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', body, { responseType: 'arraybuffer' });
     if (status !== 200) return null;
     const tx = VersionedTransaction.deserialize(new Uint8Array(data));
     tx.sign([kp]);
@@ -78,25 +71,19 @@ export async function marketBuy() {
   if (spendable < minLamports) { console.log('[swap] not enough SOL'); return null; }
   const amountLamports = Number(spendable);
 
-  const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase(); // auto | jupiter | pump
+  const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase();
   try {
     if (provider === 'pump') {
       const pumpRes = await pumpLocalBuy(amountLamports, outputMint, kp, conn);
       if (pumpRes) return pumpRes;
       console.log('[swap] pump local buy failed'); return null;
     }
-
     const jupRes = await jupiterSwap(amountLamports, outputMint, kp, conn);
     if (jupRes) return jupRes;
-
-    if (provider === 'jupiter') {
-      console.log('[swap] no route (jupiter only)'); return null;
-    }
-
+    if (provider === 'jupiter') { console.log('[swap] no route (jupiter only)'); return null; }
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
     const pumpRes = await pumpLocalBuy(amountLamports, outputMint, kp, conn);
     if (pumpRes) return pumpRes;
-
     console.log('[swap] no route and pump fallback failed');
     return null;
   } catch (e) {
