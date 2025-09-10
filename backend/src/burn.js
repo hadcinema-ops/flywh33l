@@ -1,5 +1,6 @@
+// Use ASSOCIATED_TOKEN_PROGRAM_ID explicitly to avoid 'Invalid arguments' and try SPL + Token-2022.
 import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
-import { getAssociatedTokenAddress, createBurnCheckedInstruction, getMint, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
+import { getAssociatedTokenAddress, createBurnCheckedInstruction, getMint, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bs58 from 'bs58';
 
 function rpc() { const url = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com'; return new Connection(url, 'confirmed'); }
@@ -7,7 +8,7 @@ function keypairFromEnv() { const secret = process.env.SIGNER_SECRET_KEY; if (!s
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
 async function tryBurn(conn, kp, mintPk, programId) {
-  const ata = await getAssociatedTokenAddress(mintPk, kp.publicKey, false, programId);
+  const ata = await getAssociatedTokenAddress(mintPk, kp.publicKey, false, programId, ASSOCIATED_TOKEN_PROGRAM_ID);
   let mintInfo;
   try { mintInfo = await getMint(conn, mintPk, undefined, programId); } catch { return null; }
   let tokenAcc;
@@ -15,8 +16,7 @@ async function tryBurn(conn, kp, mintPk, programId) {
   const amount = tokenAcc.amount;
   if (amount <= 0n) return null;
   const ix = createBurnCheckedInstruction(ata, mintPk, kp.publicKey, amount, mintInfo.decimals, [], programId);
-  const tx = new Transaction().add(ix);
-  tx.feePayer = kp.publicKey;
+  const tx = new Transaction().add(ix); tx.feePayer = kp.publicKey;
   const sig = await conn.sendTransaction(tx, { signers: [kp], maxRetries: 3 });
   return { signature: sig, amountTokens: Number(amount) };
 }

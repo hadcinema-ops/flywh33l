@@ -1,4 +1,4 @@
-// Defensive Pump/Jupiter buy: always return signature once sent; never throw on confirm/reads.
+// Defensive buy path for Jupiter/Pump; returns immediately after send; tokensOut measured best-effort.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
@@ -19,16 +19,10 @@ async function getAtaAcc(conn, mintPk, ownerPk) {
   const ata = await getAssociatedTokenAddress(mintPk, ownerPk, false);
   try { return await getAccount(conn, ata); } catch { return null; }
 }
-
 async function measureTokensOut(conn, mintPk, ownerPk, beforeAcc, sig) {
-  // Try confirm but don't fail the whole step if it throws
   try { await conn.confirmTransaction(sig, 'confirmed'); } catch {}
   let afterAcc=null;
-  for (let i=0;i<8;i++){
-    try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {}
-    if (afterAcc) break;
-    await sleep(500);
-  }
+  for (let i=0;i<8;i++){ try { afterAcc = await getAtaAcc(conn, mintPk, ownerPk); } catch {} if (afterAcc) break; await sleep(500); }
   const before = beforeAcc ? Number(beforeAcc.amount) : 0;
   const after = afterAcc ? Number(afterAcc.amount) : 0;
   return Math.max(0, after - before);
@@ -45,8 +39,7 @@ async function jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAc
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { skipPreflight: false, maxRetries: 3 });
   console.log('[buy:jup] sent', sig);
-  let tokensOut = 0;
-  try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
+  let tokensOut = 0; try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
   return { signature: sig, amountInSol: amountLamports / 1e9, tokensOut };
 }
 
@@ -76,8 +69,7 @@ async function pumpLocalBuy(spendableLamports, outputMint, kp, conn, mintPk, bef
   tx.sign([kp]);
   const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
   console.log('[buy:pump] sent', sig);
-  let tokensOut = 0;
-  try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
+  let tokensOut = 0; try { tokensOut = await measureTokensOut(conn, mintPk, kp.publicKey, beforeAcc, sig); } catch {}
   return { signature: sig, amountInSol: amountSol, tokensOut };
 }
 
@@ -98,17 +90,13 @@ export async function marketBuy() {
 
   const provider = (process.env.SWAP_PROVIDER || 'auto').toLowerCase();
   try {
-    if (provider === 'pump') {
-      const res = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
-      return res;
-    }
+    if (provider === 'pump') return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
     const amountLamports = Number(spendable);
     const jupRes = await jupiterBuy(amountLamports, outputMint, kp, conn, mintPk, beforeAcc);
     if (jupRes) return jupRes;
     if (provider === 'jupiter') { console.log('[swap] no route (jupiter only)'); return null; }
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
-    const pumpRes = await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
-    return pumpRes;
+    return await pumpLocalBuy(spendable, outputMint, kp, conn, mintPk, beforeAcc);
   } catch (e) {
     const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
     console.error('[swap] error', msg);
