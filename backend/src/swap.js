@@ -1,4 +1,5 @@
-// Swap with Jupiter by default; if no route or SWAP_PROVIDER='pump', fall back to PumpPortal Local buy
+// Fix: PumpPortal Local 'buy' expects amount as SOL decimal string (not lamports).
+// Also set pool='pump' and optional priorityFee.
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import bs58 from 'bs58';
@@ -13,8 +14,15 @@ function keypairFromEnv() {
 function rpc() { const url = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com'; return new Connection(url, 'confirmed'); }
 async function getSolBalanceLamports(conn, pubkey) { return await conn.getBalance(pubkey, { commitment: 'confirmed' }); }
 
+function lamportsToSolStr(lamports) {
+  const sol = Number(lamports) / 1e9;
+  const min = Number(process.env.MIN_PUMP_SOL || '0.001');
+  const val = Math.max(sol, min);
+  return val.toFixed(6); // 6dp string
+}
+
 async function jupiterSwap(amountLamports, outputMint, kp, conn) {
-  const slippageBps = Number(process.env.SLIPPAGE_BPS || 300); // widen a bit
+  const slippageBps = Number(process.env.SLIPPAGE_BPS || 300);
   const quoteResp = await axios.get('https://quote-api.jup.ag/v6/quote', {
     params: { inputMint: SOL_MINT, outputMint, amount: amountLamports, slippageBps, onlyDirectRoutes: false }
   });
@@ -34,19 +42,27 @@ async function jupiterSwap(amountLamports, outputMint, kp, conn) {
 }
 
 async function pumpLocalBuy(amountLamports, outputMint, kp, conn) {
-  // Use PumpPortal Local buy (no API key). Amount denominated in SOL.
-  const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', {
-    publicKey: kp.publicKey.toBase58(),
-    action: 'buy',
-    mint: outputMint,
-    denominatedInSol: true,
-    amount: String(Math.max(1, amountLamports)) // as string; ensure >0
-  }, { responseType: 'arraybuffer' });
-  if (status !== 200) return null;
-  const tx = VersionedTransaction.deserialize(new Uint8Array(data));
-  tx.sign([kp]);
-  const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
-  return { signature: sig, amountInSol: amountLamports / 1e9, estTokensOut: 0 };
+  const amountSol = lamportsToSolStr(amountLamports);
+  try {
+    const { data, status } = await axios.post('https://pumpportal.fun/api/trade-local', {
+      publicKey: kp.publicKey.toBase58(),
+      action: 'buy',
+      mint: outputMint,
+      denominatedInSol: true,
+      amount: amountSol,          // decimal SOL string
+      pool: 'pump',
+      priorityFee: Number(process.env.PRIORITY_FEE_SOL || '0')
+    }, { responseType: 'arraybuffer' });
+    if (status !== 200) return null;
+    const tx = VersionedTransaction.deserialize(new Uint8Array(data));
+    tx.sign([kp]);
+    const sig = await conn.sendTransaction(tx, { maxRetries: 3 });
+    return { signature: sig, amountInSol: Number(amountSol), estTokensOut: 0 };
+  } catch (e) {
+    const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
+    console.error('[swap:pump-local] buy error', msg);
+    return null;
+  }
 }
 
 export async function marketBuy() {
@@ -70,7 +86,6 @@ export async function marketBuy() {
       console.log('[swap] pump local buy failed'); return null;
     }
 
-    // Try Jupiter first (auto or jupiter)
     const jupRes = await jupiterSwap(amountLamports, outputMint, kp, conn);
     if (jupRes) return jupRes;
 
@@ -78,7 +93,6 @@ export async function marketBuy() {
       console.log('[swap] no route (jupiter only)'); return null;
     }
 
-    // Auto fallback: PumpPortal Local
     console.log('[swap] no route on Jupiter — falling back to PumpPortal Local buy');
     const pumpRes = await pumpLocalBuy(amountLamports, outputMint, kp, conn);
     if (pumpRes) return pumpRes;
@@ -86,7 +100,8 @@ export async function marketBuy() {
     console.log('[swap] no route and pump fallback failed');
     return null;
   } catch (e) {
-    console.error('[swap] error', e?.response?.data || e.message || e);
+    const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
+    console.error('[swap] error', msg);
     return null;
   }
 }

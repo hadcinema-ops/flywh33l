@@ -35,7 +35,8 @@ export async function claimCreatorFees() {
     console.log('[pump-local] claimed creator fees:', sig);
     return sig;
   } catch (e) {
-    console.error('[pump-local] claim error', e?.response?.data || e.message || e);
+    const msg = e?.response?.data ? Buffer.from(e.response.data).toString('utf8') : (e.message || String(e));
+    console.error('[pump-local] claim error', msg);
     return null;
   }
 }
